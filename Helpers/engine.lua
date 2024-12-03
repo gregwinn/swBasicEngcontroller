@@ -1,8 +1,7 @@
 -- Start the engine
 ---@param rps number
----@param start boolean
-function startEngine(rps, start)
-    if (rps < 3 and start) then
+function actionStartEngine(rps)
+    if (rps < 3) then
         return true
     end
     return false
@@ -11,9 +10,8 @@ end
 -- Check if the engine is running over the idle RPS
 ---@param rps number
 ---@param start boolean
-function isEngineRunning(rps, start, idleRPS)
-    idleRPS = idleRPS - 1
-    if (rps >= idleRPS and start) then
+function isEngineRunning(rps, start)
+    if (rps >= 3 and start) then
         return true
     end
     return false
@@ -23,50 +21,33 @@ end
 ---@param airVolume number
 ---@param fuelVolume number
 ---@return number
-function engineAFR(airVolume, fuelVolume)
+function getEngineAFR(airVolume, fuelVolume)
     -- Air Fuel Ratio
+    airVolume = airVolume * 1000
+    fuelVolume = fuelVolume * 1000
     afr = airVolume / (fuelVolume + 0.00001)
-    if afr > 0 then
-        return afr
-    else
-        return 0
-    end
+    return afr
 end
 
--- Engine Throttle to Idle
----@param throttle number
----@param afr number - as decimal
----@return number
-function engineThrottleToIdle(throttle, afr)
-    -- Throttle idle
-    if throttle < afr then
-        throttle = afr
-    end
-    return throttle
-end
 
--- Check to see if Engine is idle
----@param rps number
----@param idleRPS number
+-- Cooling for engine based on temp
+---comment
+---@param engTemp number in Celsius
+---@param startTemp number in Celsius
 ---@return boolean
-function isEngineIdle(rps, idleRPS)
-    if rps <= idleRPS then
+function actionStartCooling(engTemp, startTemp, battery)
+    if (engTemp > startTemp) and battery > 0.4 then
         return true
     end
     return false
 end
 
--- Min-Max function
----@param value number
----@param min_value number
----@param max_value number
----@return number
-function clamp(value, min_value, max_value)
-    if value < min_value then
-        return min_value
-    elseif value > max_value then
-        return max_value
-    else
-        return value
-    end
+--- Checks if the engine's RPS is within an acceptable range of the target RPS.
+---@param targetRPS number: The desired target RPS.
+---@param currentRPS number: The current measured RPS.
+---@param tolerance number: The maximum allowable difference below the target (default: 1 RPS).
+---@return boolean: True if RPS is acceptable, False otherwise.
+function isEngineRPSAcceptable(targetRPS, currentRPS, tolerance)
+    tolerance = tolerance or 1 -- Default tolerance is 1 RPS
+    return currentRPS >= (targetRPS - tolerance)
 end

@@ -25,16 +25,14 @@ do
         simulator:setInputBool(1, simulator:getIsToggled(1))
 
         -- Incoming ENG RPS, should be a whole number only
-        simulator:setInputNumber(2, simulator:getSlider(1) * 20)
+        --simulator:setInputNumber(2, simulator:getSlider(1) * 20)
+        simulator:setInputNumber(2, simulator:getSlider(1) * 10)
 
-        -- Incoming Idle RPS (Proporty value 3 to 6)
-        simulator:setInputNumber(3, simulator:getSlider(2) * 20)
+        -- Incoming Idle RPS (Proporty value 5 to 10) hardset to 6 for testing
+        simulator:setInputNumber(3, 6)
 
         -- Incoming Throttle
         simulator:setInputNumber(4, simulator:getSlider(3))
-
-        -- Incoming Proporty AFR (Proporty value 12 to 15)
-        simulator:setInputNumber(8, simulator:getSlider(4) * 20)
 
         -- Engine Air Volume
         simulator:setInputNumber(5, 0)
@@ -42,6 +40,13 @@ do
         simulator:setInputNumber(6, 0)
         -- Engine Temp
         simulator:setInputNumber(7, 0)
+
+        -- Incoming Proporty AFR (Proporty value 12 to 15)
+        simulator:setInputNumber(8, 14.2)
+        -- Proporty: Start Colling at Temp
+        simulator:setInputNumber(9, 70)
+        -- Battery
+        simulator:setInputNumber(10, simulator:getSlider(4))
 
         -- NEW! button/slider options from the UI
         --simulator:setInputBool(31, simulator:getIsClicked(1))       -- if button 1 is clicked, provide an ON pulse for input.getBool(31)
@@ -61,46 +66,62 @@ end
 
 require("Helpers.base")
 require("Helpers.engine")
-
+require("Helpers.afr")
 
 ticks = 0
-afrCounterValue = 0
 fuelFlowOutput = 0
-adjustedAFR = 14.6
-adjustedAFRDec = adjustedAFR / 100
-propAFR = 0
-propAFRDec = 0.05
-AirFlowOutputCounter = createAFRCounter(0.5, 0.0005, 0.02, 0.8)
-FuelFlowOutputPid = PIDController(0.001)
+fuelFlowSmoothed = 0
+airFlowOutput = 0
+airFlowSmoothed = 0
+throttleOutput = 0.001
+local throttleCap = 1.0
+local electricRPSFactor = 10
+local mainClutchOutput = 0
+local rpsOverMin = false
+local electricEngineOutput = 0
+local maxRPS = 20 -- Maximum allowable RPS
+local maxRPSDeadband = 0.3
+local fuelTankWarning = false
+local minIdleThrottle = 0.001
 
-underRPS = false
+-- Throttle buffer settings
+local throttleBuffer = {}
+local throttleBufferSize = 10
+
+local pidClutch = {
+    Kp = 0.001,  -- Proportional gain
+    Ki = 0.002,  -- Integral gain
+    Kd = 0.003, -- Derivative gain
+    integral = 0,
+    prevError = 0
+}
+local dt = 1 / 60 -- Assume 60 Hz system
 
 function onTick()
     ticks = ticks + 1
 
     -- Outputs
-    -- 1: ENG Starter
-    output.setBool(1, false)
-    -- 2: ENG Started
-    output.setBool(2, false)
-    -- 3: Fuel Flow
-    output.setNumber(3, 0)
-    -- 4: Air Flow
-    output.setNumber(4, 0)
-    airFlowOutput = 0
-    -- 5: Electric Engine
-    output.setNumber(5, 0)
-    -- 6: AFR Counter information
-    output.setNumber(6, 0)
-    -- 7: Engine AFR Calculation
-    output.setNumber(7, 0)
+    -- 1: ENG Starter (boolean)
+    -- 2: ENG Started (boolean)
+    -- 3: Fuel Flow (number)
+    -- 4: Air Flow (number)
+    -- 5: To Electric Engine (Number)
+    -- 6: To Cooling Pumps/Fan (boolean)
+    -- 7: Clutch (number)
+    -- 8: To Clutch Controller
+        -- 1: ENG RPS (number)
+        -- 2: ENG Temp (number)
+        -- 3: Drive Clutch ready (boolean)
+    -- 9: Fuel Warning (boolean)
+    -- 10: Tank Level  (number)
+    -- 11: Testing block (number)
 
     -- Inputs
     -- 1: ENG Start/Key
     keyOn = input.getBool(1)
     -- 2: ENG RPS
-    engRPS = round(input.getNumber(2))
-    -- 3: Idle RPS
+    engRPS = input.getNumber(2)
+    -- 3: Proparty: Idle RPS (5 to 10)
     idleRPS = round(input.getNumber(3))
     -- 4: Throttle
     throttle = input.getNumber(4)
@@ -108,94 +129,165 @@ function onTick()
     airVolume = input.getNumber(5)
     -- 6: Fuel Volume
     fuelVolume = input.getNumber(6)
-    engAFR = airVolume / (fuelVolume + 0.00001)  -- Avoid division by zero
+    engAFR = getEngineAFR(airVolume, fuelVolume)
     engAFRDec = engAFR / 100
-    output.setNumber(7, fuelVolume)
-
     -- 7: Engine Temp
     engTemp = input.getNumber(7)
-    -- 8: Proporty AFR (12 to 15)
+    -- 8: Proporty: AFR (12 to 15)
     propAFR = input.getNumber(8)
     propAFRDec = propAFR / 100
+    -- 9: Proporty: Start Colling at Temp
+    startTemp = input.getNumber(9)
+    -- 10: Battery
+    battery = input.getNumber(10)
+    -- 11: Fuel Level
+        -- Small tank: 3.63L
+        -- Medium tank: 133.42L
+        -- Large tank: 696.09L
+    tankLevel = input.getNumber(11)
+    -- 12: Tank Size
+    tankSize = input.getNumber(12)
 
-    -- Logic
-    -- Turn on starter if the RPS is less than 3
-    output.setBool(1, startEngine(engRPS, keyOn))
+
+
     -- Check if the engine is running
-    engOn = isEngineRunning(engRPS, keyOn, idleRPS)
+    engOn = isEngineRunning(engRPS, keyOn)
     output.setBool(2, engOn)
 
-    -- Fuel and Air flow based on throttle on if engine key is on
+    -- Logic
     if keyOn then
+        engineStarterEngaged = actionStartEngine(engRPS)
+        output.setBool(1, engineStarterEngaged)
+        
+        -- Keep throttle trend
+        local throttleTrend = updateTrend(throttle, throttleBuffer, throttleBufferSize)
 
-        if throttle <= propAFRDec then
-            if engRPS < idleRPS then
-                underRPS = true
-                -- Adjust propAFRDec
-                adjustedAFRDec = adjustedAFRDec + 0.0001
+        -- Air / Fuel Flow
+        -- if minIdleThrottle > throttle and throttle > 0 then
+        --     throttle = minIdleThrottle
+        --     output.setNumber(11, 1)
+        -- end
+        if throttle >= throttleOutput or throttle > 0 then
+            output.setNumber(11, 2)
+            -- Electric Assist
+            -- Calculate Effective RPS
+            local effectiveRPS = engRPS - (electricEngineOutput * electricRPSFactor)
+            -- Electric Assist
+            if throttleTrend > 0 then
+                electricEngineOutput = math.min(1.0, electricEngineOutput + 0.001) -- Gradually increase electric assist
             else
-                underRPS = false
-                -- Adjust propAFRDec
-                adjustedAFRDec = adjustedAFRDec - 0.0001
+                electricEngineOutput = math.max(0, electricEngineOutput - 0.001) -- Gradually decrease electric assist
+            end
+
+            -- Manage Throttle and Effective RPS
+            if effectiveRPS > maxRPS then
+                output.setNumber(11, 3)
+                -- Effective RPS exceeds max, reduce throttle and throttleCap
+                throttleCap = math.max(throttleCap - 0.0001, 0.01) -- Gradually reduce throttle cap
+                throttleOutput = math.min(throttleOutput - 0.0001, throttleCap) -- Reduce throttle within cap
+            elseif math.abs(effectiveRPS - maxRPS) <= maxRPSDeadband then
+                output.setNumber(11, 4)
+                -- Effective RPS is within deadband near maxRPS
+                if throttleTrend < 0 then
+                    -- User is throttling down, decrease throttleOutput smoothly
+                    if throttle < throttleOutput then
+                        -- Reduce throttleOutput faster to match user input
+                        throttleOutput = math.max(throttleOutput - 0.0005, throttle, minIdleThrottle)
+                    else
+                        -- Ensure throttleOutput respects throttleCap but doesn't spike back up
+                        throttleOutput = math.min(throttleOutput, throttleCap)
+                    end
+                    -- Disable electric assist when throttling down
+                    electricEngineOutput = 0
+                elseif effectiveRPS > maxRPS then
+                    -- Gradually reduce throttle to maintain maxRPS
+                    throttleOutput = math.max(throttleOutput - 0.00005, minIdleThrottle)
+                else
+                    output.setNumber(11, 5)
+                    -- Maintain throttle to avoid dropping RPS below maxRPS
+                    -- Gradual recovery to user throttle while maintaining stability
+                    if throttle > throttleOutput then
+                        -- Gradually increase throttle toward user input
+                        throttleOutput = math.min(throttleOutput + 0.0001, throttle, throttleCap)
+                    else
+                        -- Maintain adjusted throttle or idle minimum
+                        throttleOutput = math.max(throttleOutput, minIdleThrottle)
+                    end
+
+                end
+            else
+                -- When not near maxRPS
+                if throttleOutput < throttle then
+                    -- Gradually increase throttle if user throttles up
+                    throttleCap = math.min(throttleCap + 0.00001, 1.0) -- Gradually restore throttle cap
+                    throttleOutput = math.min(throttleOutput + 0.00005, throttleCap) -- Respect the cap
+                else
+                    -- Gradual adjustment instead of abrupt reset to throttle
+                    throttleOutput = math.max(math.min(throttleOutput + 0.0001, throttleCap), minIdleThrottle)
+                end
             end
         else
-            adjustedAFRDec = propAFRDec
+            output.setNumber(11, 6)
+            throttleOutput = throttle
+            throttleData = stabilizeIdleRPS(engRPS, idleRPS, throttleOutput)
+            throttleOutput = throttleData.throttle
+            electricEngineOutput = throttleData.electricEngine
+            minIdleThrottle = throttleData.minimumIdleThrottle
         end
 
-        -- Configure min Throttle based on propAFR
-        throttle = engineThrottleToIdle(throttle, propAFRDec)
+        fuelFlowOutput = throttleOutput * updateAFRControl(engAFR, propAFR, airVolume)
+        airFlowOutput = throttleOutput
 
-        -- Calculate AFR based on temperature and desired stoichiometric coefficient 
-        s = 0.2 
-        T = engTemp 
-        AFR = (14 - 2 * s) * (1 - 0.01 * T) + (15 - 5 * s) * (0.01 * T)
+        -- Main Clutch
+        -- Check to make sure Engine is ready for main clutch to engage.
+        rpsOverMin = isEngineRPSAcceptable(idleRPS, engRPS, 1)
+        if rpsOverMin and not engineStarterEngaged then
+            -- Get clutch engagement value
+            mainClutchOutput = actionClutch(mainClutchOutput, dt, pidClutch)
+        end
 
+        -- Fuel Level
+        fuelPst = (tankLevel / tankSize) * 100
+        if fuelPst < 10 then
+            fuelTankWarning = true
+        else
+            fuelTankWarning = false
+        end
 
-        -- Calculate desired air flow directly based on throttle and propAFR, and clamp it
-        airFlowOutput = clamp(throttle, propAFRDec, 1)
-        -- Adjust fuel flow to match the desired air flow and maintain AFR
-        -- fuelFlowOutput = clamp(airFlowOutput / propAFR * afrCounterValue, propAFRDec / propAFR, 1) 
-        initialFuelFlow = throttle * (6.88 + (0.0625 * 0)) / AFR
-        
-        -- Ensure that the fuelFlowOutput does not go below a safe minimum threshold
-        -- if fuelFlowOutput < propAFRDec / propAFR then
-        --     fuelFlowOutput = propAFRDec / propAFR
-        -- end
 
         output.setNumber(3, fuelFlowOutput)
         output.setNumber(4, airFlowOutput)
-        output.setNumber(6, afrCounterValue)
+        output.setNumber(5, electricEngineOutput)
+        output.setNumber(7, mainClutchOutput)
+
+    else
+        -- Engine off
+        fuelFlowOutput = 0
+        airFlowOutput = 0
+        mainClutchOutput = 0
+        minIdleThrottle = 0.001
+        output.setNumber(3, 0)
+        output.setNumber(4, 0)
+        output.setNumber(5, 0)
+        output.setNumber(7, 0)
     end
+
+    -- Cooling
+    -- Cooling may be required if the engine is not running and the temperature is above the startTemp
+    output.setBool(6, actionStartCooling(engTemp, startTemp, battery))
+    
+    -- Fuel Level
+    fuelPst = (tankLevel / tankSize) * 100
+    if fuelPst < 10 then
+        fuelTankWarning = true
+    else
+        fuelTankWarning = false
+    end
+    output.setBool(9, fuelTankWarning)
+
+    output.setNumber(10, tankLevel)
 end
-
-
-
 
 function onDraw()
-    -- Draw the screen
-    if keyOn then
-        screen.drawText(0, 0, "key on")
-    else
-        screen.drawText(0, 0, "key off")
-    end
     
-    if engOn then
-        screen.drawText(0, 10, "ENG RUN")
-    else
-        screen.drawText(0, 10, "ENG OFF")
-    end
-    screen.drawText(0, 20, "AFR:" .. engAFR)
-    screen.drawText(0, 30, "RPS:" .. engRPS)
-    screen.drawText(0, 40, "Fuel:" .. fuelFlowOutput)
-    screen.drawText(0, 50, "Air:" .. airFlowOutput)
-    screen.drawText(0, 60, "PAFRd:" .. propAFRDec)
-    screen.drawText(0, 70, "Thro:" .. throttle)
-
-    if underRPS then
-        screen.drawText(0, 80, "UP/DNW: UP")
-    else
-        screen.drawText(0, 80, "UP/DNW: DNW")
-    end
 end
-
-
