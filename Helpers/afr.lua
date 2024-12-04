@@ -8,28 +8,25 @@ local integralLimit_AFR = 0.05 -- Limit for the integral term to prevent windup
 -- Deadband for AFR Adjustment
 local AFR_DEADBAND = 0.15 -- No adjustments made if error is within this range
 
--- PID Constants for RPS (Idle Speed) Control
-local Kp_RPS = 0.1  -- Proportional gain for RPS control
-local Ki_RPS = 0.05  -- Integral gain for RPS control
-local Kd_RPS = 0.02 -- Derivative gain for RPS control
-local integralLimit_RPS = 2 -- Limit for the RPS integral term
-local previousErrorRPS = 0 -- Track the last error for derivative calculation
-local minThrottle = 0.015 -- Initial minimum throttle (starting point)
-local minIdleThrottle = 0.001
+-- RPS Controls
+local adjustedThrottle = 0
+local adjustedThrottleCounter = newUpDownCounter(0.14,  0.0000001, 1, 0.0005)
+local RPS_microAdjustment1 = 0.00005
+local RPS_microAdjustment2 = 0.00001
+local RPS_microAdjustment3 = 0.000005
+local RPS_deadband1 = 1
+local RPS_deadband2 = 0.4
+local RPS_deadband3 = 0.15
+local RPS_Values = newNumberCollector(20)
+local Throttle_Values = newNumberCollector(10)
 
 -- Persistent Variables
 local integralAFR = 0 -- Integral accumulator for AFR control
-local integralRPS = 0 -- Integral accumulator for RPS control
 local fuelFlowAFRCounter = 0.5 -- Initial fuel flow adjustment factor
-
-local rpsBuffer = {} -- Buffer to store recent RPS values
-local rpsBufferSize = 10 -- Number of readings to track
 
 -- Electric Engine Boost Logic
 local electricEngine = 0
-local electricIncrement = 0.0001 -- Step size for electric engine adjustment
-local electricThreshold = 1 -- RPS difference to activate electric engine
-local electricDeadband = 0.2 -- RPS range to deactivate electric engine
+
 
 -- Update Fuel Flow for AFR Control
 --- Adjusts fuel flow to maintain the target AFR using a PI controller.
@@ -72,99 +69,58 @@ end
 ---@param throttle number: Current throttle value
 ---@return table: Adjusted throttle value and electric engine boost, and minimumIdleThrottle
 function stabilizeIdleRPS(currentRPS, targetRPS, throttle)
-    local error = targetRPS - currentRPS
-    local derivative = error - previousErrorRPS -- Change in error
-    previousErrorRPS = error -- Update previous error
+    local deadbandLevels = {
+        {range = RPS_deadband3, adjustment = RPS_microAdjustment3},
+        {range = RPS_deadband2, adjustment = RPS_microAdjustment2},
+        {range = RPS_deadband1, adjustment = RPS_microAdjustment1}
+    }
 
-    -- Proportional-Integral-Derivative Control for RPS
-    integralRPS = integralRPS + error
-
-    -- Limit integral to prevent windup
-    if integralRPS > integralLimit_RPS then
-        integralRPS = integralLimit_RPS
-    elseif integralRPS < -integralLimit_RPS then
-        integralRPS = -integralLimit_RPS
-    end
-
-    local adjustment = (Kp_RPS * error) + (Ki_RPS * integralRPS) + (Kd_RPS * derivative)
-
-    -- Min Throttle Logic
-    local plateauOffset = 0.6 -- RPS offset where the engine plateaus
-    local adaptiveIncrement = 0.0002 -- Base throttle increment
-    local adaptiveMultiplier = 2.0 -- Boost multiplier
-    local startupThreshold = targetRPS - plateauOffset -- Keep momentum active until past plateau
-
-    if currentRPS < startupThreshold then
-        -- Adaptive momentum boost near plateau
-        local increment = adaptiveIncrement * adaptiveMultiplier
-        minThrottle = math.min(minThrottle + increment, 1.0)
-    else
-        -- Post-startup adjustments
-        local deadband = 0.2 -- Close range around the target RPS for small adjustments
-        local fineGrainDeadband = 0.01 -- Smaller deadband for fine adjustments
-        local largeAdjustmentRange = 0.6 -- Larger range for aggressive corrections
-        local largeIncrement = 0.0002 -- Increment for large adjustments
-        local smallIncrement = 0.00002 -- Increment for small adjustments
-
-        -- Determine adjustment level
-        if currentRPS <= targetRPS - largeAdjustmentRange then
-            -- Large adjustment for low RPS
-            minThrottle = math.min(minThrottle + largeIncrement, 1.0)
-        elseif currentRPS > targetRPS + largeAdjustmentRange then
-            -- Large adjustment for high RPS
-            minThrottle = math.max(minThrottle - largeIncrement, 0.01)
-        elseif math.abs(currentRPS - targetRPS) <= deadband then
-            -- Small adjustments based on trend when within the deadband
-            local rpsTrend = updateTrend(currentRPS, rpsBuffer, rpsBufferSize)
-            if rpsTrend > 0 then
-                -- RPS is increasing; reduce throttle slightly
-                minThrottle = math.max(minThrottle - smallIncrement, 0.01)
-            elseif rpsTrend < 0 then
-                -- RPS is decreasing; increase throttle slightly
-                minThrottle = math.min(minThrottle + smallIncrement, 1.0)
+    -- Check which deadband the current RPS falls into
+    for _, level in ipairs(deadbandLevels) do
+        if math.abs(currentRPS - targetRPS) <= level.range then
+            if currentRPS < targetRPS then
+                adjustedThrottleCounter.microAdjustmentUp(adjustedThrottleCounter, level.adjustment)
+            elseif currentRPS > targetRPS then
+                adjustedThrottleCounter.microAdjustmentDown(adjustedThrottleCounter, level.adjustment)
             end
-            if rpsTrend <= fineGrainDeadband or rpsTrend >= fineGrainDeadband then
-                minIdleThrottle = minThrottle
+            
+            -- Record RPS and Throttle Values for trends
+            RPS_Values.addNumber(RPS_Values, currentRPS)
+            Throttle_Values.addNumber(Throttle_Values, adjustedThrottleCounter.getValue(adjustedThrottleCounter))
+            
+            -- Check for stability after collecting enough values
+            if RPS_Values.getLength(RPS_Values) >= 20 then
+                adjustedThrottleCounter.setValue(adjustedThrottleCounter, Throttle_Values.getAverage(Throttle_Values))
             end
+            
+            adjustedThrottle = adjustedThrottleCounter.getValue(adjustedThrottleCounter)
+            return {
+                throttle = adjustedThrottle,
+                electricEngine = electricEngine,
+                minIdleThrottle = Throttle_Values.getAverage(Throttle_Values)
+            }
         end
     end
 
-    -- Electric Engine Logic
-    if currentRPS < targetRPS - electricThreshold then
-        -- Significantly below target RPS: Gradually increase electric engine power
-        electricEngine = math.min(1.0, electricEngine + electricIncrement)
-    elseif currentRPS >= targetRPS - 0.3 and currentRPS < targetRPS then
-        -- Near target RPS but below: Maintain or slightly reduce electric power
-        electricEngine = math.max(electricEngine - (electricIncrement / 2), 0)
-    elseif math.abs(currentRPS - targetRPS) <= electricDeadband then
-        -- Within target RPS range (deadband): Turn off the electric engine
-        electricEngine = 0
-    elseif currentRPS >= targetRPS + 0.7 then
-        -- Well above target RPS: Ensure the electric engine is off
-        electricEngine = 0
+    -- Handle cases outside the deadbands
+    if currentRPS > targetRPS then
+        adjustedThrottleCounter.decrement(adjustedThrottleCounter)
+    elseif currentRPS < targetRPS then
+        adjustedThrottleCounter.increment(adjustedThrottleCounter)
     end
 
-    -- **Compensation After Electric Engine Turns Off**
-    if electricEngine == 0 and currentRPS < targetRPS then
-        -- Boost minThrottle if RPS is below target and electric engine is off
-        minThrottle = math.min(minThrottle + adaptiveIncrement * 2, 1.0)
-    end
+    adjustedThrottle = adjustedThrottleCounter.getValue(adjustedThrottleCounter)
 
-    -- Ensure throttle is above minThrottle
-    local adjustedThrottle = math.max(minThrottle, throttle + adjustment)
-
-    -- **Dynamic Recovery Logic**
-    if electricEngine == 0 and currentRPS < targetRPS - 0.5 then
-        -- Aggressively boost throttle to recover after electric engine disengages
-        adjustedThrottle = math.min(adjustedThrottle + adaptiveIncrement * 5, 1.0)
-    end
-
-    return { 
-        throttle = clamp(adjustedThrottle, minThrottle, 1), 
+    return {
+        throttle = adjustedThrottle,
         electricEngine = electricEngine,
-        minimumIdleThrottle = minIdleThrottle
+        minIdleThrottle = Throttle_Values.getAverage(Throttle_Values)
     }
 end
+
+
+
+
 
 
 -- Is AFR Within Range

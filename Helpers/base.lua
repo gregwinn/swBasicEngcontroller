@@ -37,13 +37,9 @@ function pidController(setPoint, processVariable, dt, pidTable)
     return proportional + integral + derivative
 end
 
-
-function round(num)
-    if num >= 0 then
-        return math.floor(num + 0.5)
-    else
-        return math.ceil(num - 0.5)
-    end
+function round(num, decimalPlaces)
+    local multiplier = 10^(decimalPlaces or 0)
+    return math.floor(num * multiplier + 0.5) / multiplier
 end
 
 -- Up-Down Counter function with min, max values and reset
@@ -122,4 +118,21 @@ function updateTrend(value, valueBuffer, valueBufferSize)
     else
         return 0 -- Not enough data to determine trend
     end
+end
+
+function isTrendStable(buffer, ticks)
+    if #buffer < ticks then
+        return false
+    end
+    local sum = 0
+    for i = #buffer - ticks + 1, #buffer do
+        sum = sum + buffer[i]
+    end
+    return math.abs(sum) > 0
+end
+
+function smoothTrend(rawTrend, previousTrend)
+    -- Apply a smoothing factor to reduce noise
+    local smoothingFactor = 0.5
+    return previousTrend * smoothingFactor + rawTrend * (1 - smoothingFactor)
 end
