@@ -68,18 +68,18 @@ require("Helpers.numbercollector")
 require("Helpers.base")
 require("Helpers.engine")
 require("Helpers.afr")
+require("Helpers.throttle")
 
-ticks = 0
-fuelFlowOutput = 0
-airFlowOutput = 0
-throttleOutput = 0.01
-electricEngineOutput = 0
-mainClutchOutput = 0
-throttleCap = 1.0
+local ticks = 0
+local fuelFlowOutput = 0
+local airFlowOutput = 0
+local throttleOutput = 0.01
+local maxThrottleValue = 1
+local electricEngineOutput = 0
+local mainClutchOutput = 0
 local electricRPSFactor = 10
 local minIdleThrottle = 0.1
 local maxRPS = 20
-local maxRPSDeadband = 0.3
 
 function onTick()
     -- Outputs
@@ -128,29 +128,21 @@ function onTick()
     
         -- Electric Assist Logic
         local effectiveRPS = engRPS - (electricEngineOutput * electricRPSFactor)
-        output.setNumber(11, 1)
     
         if throttle == 0 then
-            
             -- Use stabilizeIdleRPS only when user throttle is 0
             local throttleData = stabilizeIdleRPS(effectiveRPS, idleRPS, throttleOutput)
             throttleOutput = throttleData.throttle
+            minIdleThrottle = throttleData.minIdleThrottle
         else
-            output.setNumber(11, 3)
-            -- User is controlling throttle
-            if effectiveRPS > maxRPS then
-                -- Reduce throttle if RPS exceeds max
-                throttleCap = math.max(throttleCap - 0.0001, minIdleThrottle)
-                throttleOutput = math.min(throttleOutput - 0.0001, throttleCap)
-            else
-                -- Follow user input, respect limits
-                throttleOutput = math.min(throttle, throttleCap)
-            end
+            local throttleData = throttleController(minIdleThrottle, effectiveRPS, maxRPS, throttle, maxThrottleValue)
+            throttleOutput = throttleData.throttleOutput
+            maxThrottleValue = throttleData.maxThrottleValue
         end
 
     
         -- Fuel and Air Flow Adjustment
-        fuelFlowOutput = throttleOutput * updateAFRControl(engAFR, propAFR, airVolume)
+        fuelFlowOutput = updateAFRControl(engAFR, propAFR, airFlowOutput)
         airFlowOutput = throttleOutput
     
         -- Main Clutch Logic
@@ -169,6 +161,7 @@ function onTick()
         output.setNumber(4, airFlowOutput)
         output.setNumber(5, electricEngineOutput)
         output.setNumber(7, mainClutchOutput)
+        output.setNumber(11, fuelFlowOutput)
     else
         -- Engine Off Logic
         fuelFlowOutput, airFlowOutput, electricEngineOutput = 0, 0, 0

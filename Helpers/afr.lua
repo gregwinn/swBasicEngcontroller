@@ -1,16 +1,17 @@
 -- PID Constants for AFR Control
-local Kp_AFR = 0.0001 -- Proportional gain for AFR control
-local Ki_AFR = 0.00001 -- Integral gain for AFR control
-local Kd_AFR = 0.00025 -- Derivative gain for AFR control
+local Kp_AFR = 0.001 -- Proportional gain for AFR control
+local Ki_AFR = 0.0001 -- Integral gain for AFR control
+local Kd_AFR = 0.0002 -- Derivative gain for AFR control
 local previousErrorAFR = 0 -- Track the last error for derivative calculation
 local integralLimit_AFR = 0.05 -- Limit for the integral term to prevent windup
+local adjustedFuelVolume = 0
 
 -- Deadband for AFR Adjustment
-local AFR_DEADBAND = 0.15 -- No adjustments made if error is within this range
+local AFR_DEADBAND = 0.05 -- No adjustments made if error is within this range
 
 -- RPS Controls
 local adjustedThrottle = 0
-local adjustedThrottleCounter = newUpDownCounter(0.14,  0.0000001, 1, 0.0005)
+local adjustedThrottleCounter = newUpDownCounter(0.14,  0.0000001, 1, 0.0001)
 local RPS_microAdjustment1 = 0.00005
 local RPS_microAdjustment2 = 0.00001
 local RPS_microAdjustment3 = 0.000005
@@ -34,33 +35,11 @@ local electricEngine = 0
 ---@param targetAFR number Desired AFR
 ---@param airFlow number Measured air intake volume
 ---@return number Adjusted fuel flow factor
-function updateAFRControl(engineAFR, targetAFR, airFlow)
-    local error = targetAFR - engineAFR
-    local derivative = error - previousErrorAFR -- Change in error
-    previousErrorAFR = error -- Update previous error
-
-    -- Skip adjustment if the error is within the deadband
-    if math.abs(error) <= AFR_DEADBAND then
-        return fuelFlowAFRCounter
-    end
-
-    -- Proportional-Integral-Derivative Control for AFR
-    integralAFR = integralAFR + error
-
-    -- Limit integral to prevent windup
-    if integralAFR > integralLimit_AFR then
-        integralAFR = integralLimit_AFR
-    elseif integralAFR < -integralLimit_AFR then
-        integralAFR = -integralLimit_AFR
-    end
-
-    local adjustment = (Kp_AFR * error) + (Ki_AFR * integralAFR) + (Kd_AFR * derivative)
-
-    -- Adjust fuel flow counter based on air flow
-    fuelFlowAFRCounter = fuelFlowAFRCounter + adjustment * airFlow
-    fuelFlowAFRCounter = math.max(0.1, math.min(1.0, fuelFlowAFRCounter)) -- Clamp fuel flow factor
-
-    return fuelFlowAFRCounter
+function updateAFRControl(engineAFR, targetAFR, airFlow, fuelVolume)
+    local ratio = targetAFR / 7.05
+    local targetFuelFlow = airFlow / ratio
+    
+    return targetFuelFlow
 end
 
 -- Stabilize Idle RPS
