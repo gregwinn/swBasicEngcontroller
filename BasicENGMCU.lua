@@ -63,23 +63,21 @@ end
 
 -- try require("Folder.Filename") to include code from another file in this, so you can store code in libraries
 -- the "LifeBoatAPI" is included by default in /_build/libs/ - you can use require("LifeBoatAPI") to get this, and use all the LifeBoatAPI.<functions>!
-require("Helpers.counter")
 require("Helpers.numbercollector")
 require("Helpers.base")
 require("Helpers.engine")
 require("Helpers.afr")
 require("Helpers.throttle")
+require("Helpers.battery")
 
 local ticks = 0
 local fuelFlowOutput = 0
 local airFlowOutput = 0
 local throttleOutput = 0.01
-local maxThrottleValue = 1
 local electricEngineOutput = 0
 local mainClutchOutput = 0
-local electricRPSFactor = 10
-local minIdleThrottle = 0.1
 local maxRPS = 20
+local batteryLevel = 0
 
 function onTick()
     -- Outputs
@@ -104,7 +102,7 @@ function onTick()
     -- 2: ENG RPS
     engRPS = input.getNumber(2)
     -- 3: Proparty: Idle RPS (5 to 10)
-    idleRPS = round(input.getNumber(3))
+    idleRPS = input.getNumber(3)
     -- 4: Throttle
     throttle = input.getNumber(4)
     -- 5: Air Volume
@@ -113,6 +111,9 @@ function onTick()
     fuelVolume = input.getNumber(6)
     engAFR = getEngineAFR(airVolume, fuelVolume)
     propAFR = input.getNumber(8)
+    battery = input.getNumber(10)
+    batteryLevel = getBatteryLevel(battery)
+
     tankLevel = input.getNumber(11)
     tankSize = input.getNumber(12)
 
@@ -126,34 +127,35 @@ function onTick()
         engineStarterEngaged = actionStartEngine(engRPS)
         output.setBool(1, engineStarterEngaged)
     
-        -- Electric Assist Logic
-        local effectiveRPS = engRPS - (electricEngineOutput * electricRPSFactor)
     
         if throttle == 0 then
-            -- Use stabilizeIdleRPS only when user throttle is 0
-            local throttleData = stabilizeIdleRPS(effectiveRPS, idleRPS, throttleOutput)
+            throttleData = throttleController(engRPS, idleRPS, true)
             throttleOutput = throttleData.throttle
-            minIdleThrottle = throttleData.minIdleThrottle
         else
-            local throttleData = throttleController(minIdleThrottle, effectiveRPS, maxRPS, throttle, maxThrottleValue)
-            throttleOutput = throttleData.throttleOutput
-            maxThrottleValue = throttleData.maxThrottleValue
+            local throttleToRPS = clamp(throttle * maxRPS, idleRPS, maxRPS) or idleRPS
+            throttleData = throttleController(engRPS, throttleToRPS, false)
+            throttleOutput = throttleData.throttle
+            electricEngineOutput = throttleData.electricEngine
+            output.setNumber(11, throttleToRPS)
         end
 
     
         -- Fuel and Air Flow Adjustment
-        fuelFlowOutput = updateAFRControl(engAFR, propAFR, airFlowOutput)
+        fuelFlowOutput = updateAFRControl(propAFR, airFlowOutput)
         airFlowOutput = throttleOutput
     
         -- Main Clutch Logic
-        if isEngineRPSAcceptable(idleRPS, engRPS, 1) and not engineStarterEngaged then
-            mainClutchOutput = actionClutch(mainClutchOutput, 1 / 60, {
-                Kp = 0.0001,
-                Ki = 0.0002,
-                Kd = 0.0003,
-                integral = 0,
-                prevError = 0,
+        if engRPS >= (idleRPS - 1) and not engineStarterEngaged then
+            mainClutchOutput = actionClutch(mainClutchOutput, 0, {
+                Kp = 0.1,
+                Ki = 0,
+                Kd = 0,
             })
+        end
+
+        -- Battery Check
+        if batteryLevel < 40 then
+            electricEngineOutput = 0
         end
     
         -- Output Values

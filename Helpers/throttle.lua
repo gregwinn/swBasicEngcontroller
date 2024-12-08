@@ -1,48 +1,42 @@
-local Throttle_maxValue = newNumberCollector(10)
-function throttleController(minIdleThrottle, engRPS, maxRPS, throttle, maxThrottleValue)
-    local deadbandLevels = {
-        {range = 0.5, adjustment = 0.000001},
-        {range = 1, adjustment = 0.00001},
-        {range = 5, adjustment = 0.0001}
+local RPS_Values = newNumberCollector(20)
+local Throttle_Values = newNumberCollector(10)
+local adjustedElecticThrottle = 0
+local RPS_to_Throttle_values = { 
+    [5] = 0.185, 
+    [6] = 0.186, 
+    [7] = 0.187, 
+    [8] = 0.189, 
+    [9] = 0.191, 
+    [10] = 0.193 
+}
+
+function throttleController(currentRPS, targetRPS, allowIdle, electricEngine)
+    targetRPS = targetRPS + 1
+    local setPidTable = {
+        Kp = 0.2,
+        Ki = 0,
+        Kd = 0
     }
-    if throttle < minIdleThrottle then
-        -- If throttle is below the minimum idle throttle, set it to the minimum idle throttle
-        throttleOutput = minIdleThrottle
+    local setElectricPidTable = {
+        Kp = 0.1,
+        Ki = 0,
+        Kd = 0
+    }
+    local adjustedThrottle = pidController(targetRPS, currentRPS, 0, setPidTable)
+    adjustedThrottle = clamp(adjustedThrottle, 0, 1)
+
+    if allowIdle then
+        -- For idle only
+        Throttle_Values.addNumber(Throttle_Values, adjustedThrottle)
+        RPS_Values.addNumber(RPS_Values, currentRPS)
     else
-        for _, level in ipairs(deadbandLevels) do
-            if math.abs(engRPS - maxRPS) <= level.range then
-                -- collect throttle values for max throttle value
-                if level.range < 5 then
-                    Throttle_maxValue.addNumber(Throttle_maxValue, throttleOutput)
-                end
-
-                -- set Max throttle value to throttleOutput
-                if level.range == 0.5 then
-                    maxThrottleValue = Throttle_maxValue.getAverage(Throttle_maxValue)
-                    throttleOutput = maxThrottleValue
-                end
-
-                if engRPS < maxRPS then
-                    throttleOutput = throttleOutput + level.adjustment
-                elseif engRPS > maxRPS then
-                    throttleOutput = throttleOutput - level.adjustment
-                end
-            else
-                -- Out of deadband range
-                if engRPS > maxRPS then
-                    throttleOutput = minIdleThrottle
-                else
-                    throttleOutput = throttle
-                end
-            end
-        end            
+        adjustedElecticThrottle = pidController(targetRPS, currentRPS, 0, setElectricPidTable)
     end
 
-
-
-    throttleOutput = clamp(throttleOutput, minIdleThrottle, maxThrottleValue)
     return {
-        throttleOutput = throttleOutput,
-        maxThrottleValue = maxThrottleValue
+        throttle = adjustedThrottle,
+        minIdleThrottle = Throttle_Values.getAverage(Throttle_Values) or 0,
+        electricEngine = adjustedElecticThrottle,
+        rpsAVG = RPS_Values.getAverage(RPS_Values) or 0
     }
 end

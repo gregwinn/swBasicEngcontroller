@@ -94,11 +94,8 @@ end
 ---@param pidClutch table: Table containing PID parameters and state for the clutch (Kp, Ki, Kd, integral, prevError).
 ---@return number: The new clutch engagement value (0 to 1).
 function actionClutch(currentClutch, dt, pidClutch)
-    -- Target clutch engagement is always 1 (fully engaged)
-    local targetClutch = 1
-
     -- Calculate the PID output for clutch engagement
-    local clutchAdjustment = pidController(targetClutch, currentClutch, dt, pidClutch)
+    local clutchAdjustment = pidController(1, currentClutch, dt, pidClutch)
 
     -- Clamp the clutch value between 0 (not engaged) and 1 (fully engaged)
     return math.max(0, math.min(1, currentClutch + clutchAdjustment))
