@@ -31,6 +31,7 @@ function throttleController(currentRPS, targetRPS, allowIdle, electricEngine)
         RPS_Values.addNumber(RPS_Values, currentRPS)
     else
         adjustedElecticThrottle = pidController(targetRPS, currentRPS, 0, setElectricPidTable)
+        adjustedElecticThrottle = clamp(adjustedElecticThrottle, 0, 0.5)
     end
 
     return {

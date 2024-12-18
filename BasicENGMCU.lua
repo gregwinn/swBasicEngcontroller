@@ -78,6 +78,7 @@ local electricEngineOutput = 0
 local mainClutchOutput = 0
 local maxRPS = 20
 local batteryLevel = 0
+local inReverse = false
 
 function onTick()
     -- Outputs
@@ -116,6 +117,8 @@ function onTick()
 
     tankLevel = input.getNumber(11)
     tankSize = input.getNumber(12)
+    -- 13: Transmission In reverse
+    inReverse = input.getBool(13)
 
     ticks = ticks + 1
 
@@ -131,11 +134,15 @@ function onTick()
         if throttle == 0 then
             throttleData = throttleController(engRPS, idleRPS, true)
             throttleOutput = throttleData.throttle
+            electricEngineOutput = 0
         else
             local throttleToRPS = clamp(throttle * maxRPS, idleRPS, maxRPS) or idleRPS
             throttleData = throttleController(engRPS, throttleToRPS, false)
             throttleOutput = throttleData.throttle
             electricEngineOutput = throttleData.electricEngine
+            if inReverse then
+                electricEngineOutput = -electricEngineOutput
+            end
             output.setNumber(11, throttleToRPS)
         end
 
